@@ -26,12 +26,15 @@ const pool = new Pool({
 
 // --- CONFIGURACIÓN DEL CORREO DE BALIANT ---
 const transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: "smtp.gmail.com", // Usamos el host directo en lugar de service: 'gmail'
+    port: 465,
+    secure: true,
     auth: {
-        user: process.env.EMAIL_BALIANT,
-        pass: process.env.PASSWORD_BALIANT
+        user: process.env.EMAIL_BALIANT, // Tu correo en las variables de Render
+        pass: process.env.EMAIL_PASS     // Tu contraseña de aplicación de 16 letras
     },
     tls: {
+        // Esto evita que Render se ponga exquisito con los certificados de red
         rejectUnauthorized: false
     }
 });
