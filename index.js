@@ -228,13 +228,13 @@ app.post('/webhook', async (req, res) => {
                 const direccion = infoPago.metadata.direccion;
                 const cp = infoPago.metadata.codigo_postal;
 
+                // 1. INTENTAMOS GUARDAR LA VENTA (Con su propio try/catch para manejar duplicados)
+                let ventaGuardadaOk = false;
                 try {
-                    // 🔥 Empaquetamos todo el carrito en formato JSON
                     const carritoVendido = infoPago.additional_info && infoPago.additional_info.items 
                         ? JSON.stringify(infoPago.additional_info.items) 
                         : '[]';
 
-                    // Agregamos productos_vendidos como el parámetro $11
                     await pool.query(
                         `INSERT INTO ventas (id_pago, total, estado, nombre_cliente, provincia, direccion, codigo_postal, email, telefono, usuario_id, productos_vendidos) 
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
@@ -243,7 +243,15 @@ app.post('/webhook', async (req, res) => {
                     
                     console.log("\n💰 ¡VENTA EXITOSA EN BALIANT! 💰");
                     console.log(`✅ Cliente: ${nombreCliente} | ID Usuario: ${idUsuario}`);
+                    ventaGuardadaOk = true;
+                } catch (error) {
+                    console.log("♻️ Aviso secundario de Mercado Pago ignorado (duplicado).");
+                    // No cortamos el proceso, dejamos que intente stock y correos por si la vez anterior fallaron
+                }
 
+                // 2. ENVÍO DE CORREOS (Solo si no se procesó antes o si es el primer intento exitoso)
+                // Usamos un try/catch interno para que si falla el mail, no arruine el stock
+                try {
                     const mailCliente = {
                         from: `"BALIANT" <${process.env.EMAIL_BALIANT}>`,
                         to: emailCliente,
@@ -275,61 +283,45 @@ app.post('/webhook', async (req, res) => {
                     await transporter.sendMail(mailCliente);
                     await transporter.sendMail(mailDueño);
                     console.log("✉️ ¡Los dos correos automáticos fueron enviados con éxito!\n");
+                } catch (mailError) {
+                    console.error("❌ Error enviando correos:", mailError.message);
+                }
 
-                    // ==========================================
-                    // 📉 DESCUENTO DE STOCK AUTOMÁTICO (JSON)
-                    // ==========================================
-                    // Verificamos si Mercado Pago nos mandó la lista de items
-                    if (infoPago.additional_info && infoPago.additional_info.items) {
-                        
-                        // Recorremos cada cosita que trajo el recibo
-                        for (let item of infoPago.additional_info.items) {
-                            const idProd = item.id;
-                            const talleVendido = item.description; // ¡Acá atrapamos el talle escondido!
-                            const cantVendida = Number(item.quantity);
+                // 3. ACTUALIZACIÓN DE STOCK (Solo si la venta se guardó recién, para evitar restar doble)
+                if (ventaGuardadaOk && infoPago.additional_info && infoPago.additional_info.items) {
+                    for (let item of infoPago.additional_info.items) {
+                        const idProd = item.id;
+                        const talleVendido = item.description; 
+                        const cantVendida = Number(item.quantity);
 
-                            // Si tiene ID y Talle (esto hace que ignore automáticamente el "Costo de Envío")
-                            if (idProd && talleVendido) {
-                                try {
-                                    // 1. Buscamos el stock actual de esa remera en la base de datos
-                                    const resProd = await pool.query('SELECT variantes FROM productos WHERE id = $1', [idProd]);
+                        if (idProd && talleVendido) {
+                            try {
+                                const resProd = await pool.query('SELECT variantes FROM productos WHERE id = $1', [idProd]);
+                                
+                                if (resProd.rows.length > 0) {
+                                    let variantesArray = resProd.rows[0].variantes;
                                     
-                                    if (resProd.rows.length > 0) {
-                                        let variantesArray = resProd.rows[0].variantes;
-                                        
-                                        // Por si PostgreSQL lo escupe como texto, lo convertimos a objeto real
-                                        if (typeof variantesArray === 'string') {
-                                            variantesArray = JSON.parse(variantesArray);
-                                        }
-
-                                        // 2. Buscamos la cajita exacta de ese talle (ej: "M") adentro del JSON
-                                        const indiceTalle = variantesArray.findIndex(v => v.talle === talleVendido);
-                                        
-                                        if (indiceTalle !== -1) {
-                                            // 3. ¡Tijeretazo! Restamos lo que se vendió
-                                            variantesArray[indiceTalle].stock -= cantVendida;
-                                            
-                                            // Seguro anti-negativos (por si dos compran justo al mismo milisegundo)
-                                            if (variantesArray[indiceTalle].stock < 0) {
-                                                variantesArray[indiceTalle].stock = 0; 
-                                            }
-                                            
-                                            // 4. Volvemos a guardar el JSON actualizado en la tabla
-                                            await pool.query('UPDATE productos SET variantes = $1 WHERE id = $2', [JSON.stringify(variantesArray), idProd]);
-                                            
-                                            console.log(`📉 Stock actualizado: Se restaron ${cantVendida} unid. del talle ${talleVendido} (Prenda #${idProd})`);
-                                        }
+                                    if (typeof variantesArray === 'string') {
+                                        variantesArray = JSON.parse(variantesArray);
                                     }
-                                } catch (errorStock) {
-                                    console.error("❌ Error al intentar descontar el stock del producto", idProd, errorStock);
+
+                                    const indiceTalle = variantesArray.findIndex(v => v.talle === talleVendido);
+                                    
+                                    if (indiceTalle !== -1) {
+                                        variantesArray[indiceTalle].stock -= cantVendida;
+                                        if (variantesArray[indiceTalle].stock < 0) {
+                                            variantesArray[indiceTalle].stock = 0; 
+                                        }
+                                        
+                                        await pool.query('UPDATE productos SET variantes = $1 WHERE id = $2', [JSON.stringify(variantesArray), idProd]);
+                                        console.log(`📉 Stock actualizado: Se restaron ${cantVendida} unid. del talle ${talleVendido} (Prenda #${idProd})`);
+                                    }
                                 }
+                            } catch (errorStock) {
+                                console.error("❌ Error al intentar descontar el stock del producto", idProd, errorStock);
                             }
                         }
                     }
-                    // ==========================================
-
-                } catch (error) {
-                    console.log("♻️ Aviso secundario de Mercado Pago ignorado (duplicado).");
                 }
             }
         }
