@@ -171,15 +171,18 @@ app.post('/crear-preferencia', async (req, res) => {
                 usuario_id: idUsuarioParaVenta 
             }, // <-- OJO ACÁ: La coma que cierra la metadata
 
-            // LAS URLs VAN AFUERA DE LA METADATA, AL MISMO NIVEL QUE ITEMS
+            // LAS URLs OFICIALES DE TU NUEVA CASA (Vercel)
             back_urls: {
-                // 🔥 ACÁ LE DECIMOS QUE VAYA A LA PÁGINA DE ÉXITO
-                success: "http://192.168.1.39:5500/baliant-frontend/exito.html", 
-                failure: "http://192.168.1.39:5500/baliant-frontend/index.html",
-                pending: "http://192.168.1.39:5500/baliant-frontend/index.html"
+                success: "https://baliant-frontend.vercel.app/exito.html", 
+                failure: "https://baliant-frontend.vercel.app/index.html",
+                pending: "https://baliant-frontend.vercel.app/index.html"
             },
-            // 🔥 LA BRÚJULA PARA EL CARTERO (Acá irá tu túnel público)
-            notification_url: "https://greetingless-ed-sniffily.ngrok-free.dev/webhook"
+            
+            // 🔥 ¡AHORA SÍ! Como Vercel es una web real, activamos el piloto automático
+            auto_return: "approved", 
+            
+            // EL NUEVO RADAR DEL CARTERO (Chau Ngrok, hola Render)
+            notification_url: "https://baliant-backend.onrender.com/webhook"
         };
 
         // 🔥 EL RADAR: Esto va a imprimir en tu consola negra exactamente lo que le mandás a MP
