@@ -202,13 +202,12 @@ app.post('/crear-preferencia', async (req, res) => {
 
 // --- EL TELÉFONO ROJO: WEBHOOK ---
 app.post('/webhook', async (req, res) => {
-    // 🔥 EL NUEVO RADAR:
-    console.log("🔔 ¡ALGUIEN TOCÓ LA PUERTA DEL WEBHOOK!");
-    console.log("Datos que trajo:", req.query, req.body);
+    console.log("\n🔔 [Paso 1] ¡ALGUIEN TOCÓ LA PUERTA DEL WEBHOOK!");
+    
+    // Le respondemos rápido a MP para que no mande 500 avisos iguales
+    res.status(200).send("OK");
 
     try {
-        res.status(200).send("OK");
-
         const tipoNotificacion = req.query.topic || req.body.type;
         const idNotificacion = req.query.id || req.body.data?.id;
 
@@ -218,8 +217,18 @@ app.post('/webhook', async (req, res) => {
 
             if (infoPago.status === 'approved') {
                 const idVenta = infoPago.id;
-                const totalVenta = infoPago.transaction_amount;
+                console.log(`🔍 [Paso 2] Analizando pago aprobado #${idVenta}...`);
                 
+                // --- EL VERDADERO FILTRO DE DUPLICADOS ---
+                const ventaExistente = await pool.query('SELECT id FROM ventas WHERE id_pago = $1', [idVenta]);
+                
+                if (ventaExistente.rows.length > 0) {
+                    console.log(`♻️ [Freno] La venta #${idVenta} ya estaba guardada. Ignorando duplicado real.`);
+                    return; // ⛔ ACÁ CORTA LA EJECUCIÓN SI ES DUPLICADO. Si no, sigue de largo.
+                }
+
+                console.log(`✅ [Paso 3] Es una venta NUEVA. Intentando guardar en Base de Datos...`);
+                const totalVenta = infoPago.transaction_amount;
                 const emailCliente = infoPago.metadata.email_cliente || infoPago.payer.email; 
                 const nombreCliente = infoPago.metadata.nombre_cliente;
                 const telefonoCliente = infoPago.metadata.telefono_cliente;
@@ -227,30 +236,30 @@ app.post('/webhook', async (req, res) => {
                 const provincia = infoPago.metadata.provincia;
                 const direccion = infoPago.metadata.direccion;
                 const cp = infoPago.metadata.codigo_postal;
+                const carritoVendido = infoPago.additional_info && infoPago.additional_info.items 
+                    ? JSON.stringify(infoPago.additional_info.items) 
+                    : '[]';
 
-                // 1. INTENTAMOS GUARDAR LA VENTA (Con su propio try/catch para manejar duplicados)
-                let ventaGuardadaOk = false;
+                // ==========================================
+                // 💾 1. GUARDADO EN BASE DE DATOS
+                // ==========================================
                 try {
-                    const carritoVendido = infoPago.additional_info && infoPago.additional_info.items 
-                        ? JSON.stringify(infoPago.additional_info.items) 
-                        : '[]';
-
                     await pool.query(
                         `INSERT INTO ventas (id_pago, total, estado, nombre_cliente, provincia, direccion, codigo_postal, email, telefono, usuario_id, productos_vendidos) 
                          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
                         [idVenta, totalVenta, infoPago.status, nombreCliente, provincia, direccion, cp, emailCliente, telefonoCliente, idUsuario, carritoVendido]
                     );
-                    
-                    console.log("\n💰 ¡VENTA EXITOSA EN BALIANT! 💰");
-                    console.log(`✅ Cliente: ${nombreCliente} | ID Usuario: ${idUsuario}`);
-                    ventaGuardadaOk = true;
-                } catch (error) {
-                    console.log("♻️ Aviso secundario de Mercado Pago ignorado (duplicado).");
-                    // No cortamos el proceso, dejamos que intente stock y correos por si la vez anterior fallaron
+                    console.log("💰 ¡VENTA EXITOSA EN BALIANT! (Guardada en DB)");
+                } catch (errorDB) {
+                    // SI SALTA ESTE ERROR, ES UN PROBLEMA DE SQL, NO UN DUPLICADO
+                    console.error("❌ [ERROR GRAVE EN BASE DE DATOS]:", errorDB.message);
+                    return; // Cortamos porque si no hay venta, no hay mails ni stock
                 }
 
-                // 2. ENVÍO DE CORREOS (Solo si no se procesó antes o si es el primer intento exitoso)
-                // Usamos un try/catch interno para que si falla el mail, no arruine el stock
+                // ==========================================
+                // ✉️ 2. ENVÍO DE CORREOS
+                // ==========================================
+                console.log("👉 [Paso 4] Intentando enviar correos automáticos...");
                 try {
                     const mailCliente = {
                         from: `"BALIANT" <${process.env.EMAIL_BALIANT}>`,
@@ -282,13 +291,16 @@ app.post('/webhook', async (req, res) => {
 
                     await transporter.sendMail(mailCliente);
                     await transporter.sendMail(mailDueño);
-                    console.log("✉️ ¡Los dos correos automáticos fueron enviados con éxito!\n");
-                } catch (mailError) {
-                    console.error("❌ Error enviando correos:", mailError.message);
+                    console.log("✉️ [ÉXITO] ¡Los dos correos fueron enviados!");
+                } catch (errorMail) {
+                    console.error("❌ [ERROR EN CORREOS]:", errorMail.message);
                 }
 
-                // 3. ACTUALIZACIÓN DE STOCK (Solo si la venta se guardó recién, para evitar restar doble)
-                if (ventaGuardadaOk && infoPago.additional_info && infoPago.additional_info.items) {
+                // ==========================================
+                // 📉 3. DESCUENTO DE STOCK AUTOMÁTICO
+                // ==========================================
+                console.log("👉 [Paso 5] Intentando descontar stock...");
+                if (infoPago.additional_info && infoPago.additional_info.items) {
                     for (let item of infoPago.additional_info.items) {
                         const idProd = item.id;
                         const talleVendido = item.description; 
@@ -297,36 +309,29 @@ app.post('/webhook', async (req, res) => {
                         if (idProd && talleVendido) {
                             try {
                                 const resProd = await pool.query('SELECT variantes FROM productos WHERE id = $1', [idProd]);
-                                
                                 if (resProd.rows.length > 0) {
                                     let variantesArray = resProd.rows[0].variantes;
-                                    
-                                    if (typeof variantesArray === 'string') {
-                                        variantesArray = JSON.parse(variantesArray);
-                                    }
+                                    if (typeof variantesArray === 'string') variantesArray = JSON.parse(variantesArray);
 
                                     const indiceTalle = variantesArray.findIndex(v => v.talle === talleVendido);
-                                    
                                     if (indiceTalle !== -1) {
                                         variantesArray[indiceTalle].stock -= cantVendida;
-                                        if (variantesArray[indiceTalle].stock < 0) {
-                                            variantesArray[indiceTalle].stock = 0; 
-                                        }
+                                        if (variantesArray[indiceTalle].stock < 0) variantesArray[indiceTalle].stock = 0; 
                                         
                                         await pool.query('UPDATE productos SET variantes = $1 WHERE id = $2', [JSON.stringify(variantesArray), idProd]);
-                                        console.log(`📉 Stock actualizado: Se restaron ${cantVendida} unid. del talle ${talleVendido} (Prenda #${idProd})`);
+                                        console.log(`📉 [ÉXITO] Se restaron ${cantVendida} unid. del talle ${talleVendido} (Prenda #${idProd})`);
                                     }
                                 }
                             } catch (errorStock) {
-                                console.error("❌ Error al intentar descontar el stock del producto", idProd, errorStock);
+                                console.error(`❌ [ERROR EN STOCK - Prenda #${idProd}]:`, errorStock.message);
                             }
                         }
                     }
                 }
             }
         }
-    } catch (error) {
-        console.error("Error procesando el webhook:", error);
+    } catch (errorGeneral) {
+        console.error("❌ [ERROR FATAL DEL WEBHOOK]:", errorGeneral.message);
     }
 });
 
