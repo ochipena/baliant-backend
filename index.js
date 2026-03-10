@@ -24,20 +24,6 @@ const pool = new Pool({
     }
 });
 
-// --- CONFIGURACIÓN DEL CORREO DE BALIANT ---
-const transporter = nodemailer.createTransport({
-    host: "smtp.gmail.com", // Usamos el host directo en lugar de service: 'gmail'
-    port: 587,
-    secure: false,
-    auth: {
-        user: process.env.EMAIL_BALIANT, // Tu correo en las variables de Render
-        pass: process.env.EMAIL_PASS     // Tu contraseña de aplicación de 16 letras
-    },
-    tls: {
-        // Esto evita que Render se ponga exquisito con los certificados de red
-        rejectUnauthorized: false
-    }
-});
 
 app.get('/', (req, res) => {
     res.send('¡El servidor de BALIANT está funcionando!');
@@ -260,43 +246,49 @@ app.post('/webhook', async (req, res) => {
                 }
 
                 // ==========================================
-                // ✉️ 2. ENVÍO DE CORREOS
+                // ✉️ 2. ENVÍO DE CORREOS (VÍA API GOOGLE)
                 // ==========================================
-                console.log("👉 [Paso 4] Intentando enviar correos automáticos...");
+                console.log("👉 [Paso 4] Intentando enviar correos vía API de Google...");
                 try {
-                    const mailCliente = {
-                        from: `"BALIANT" <${process.env.EMAIL_BALIANT}>`,
-                        to: emailCliente,
-                        subject: "¡Gracias por tu compra en BALIANT! 👕",
-                        html: `
-                            <h2>¡Hola! Tu pago se acreditó con éxito.</h2>
-                            <p>Gracias por confiar en BALIANT. Acá tenés el resumen de tu pedido:</p>
-                            <ul>
-                                <li><b>Número de Orden:</b> #${idVenta}</li>
-                                <li><b>Total pagado:</b> $${totalVenta}</li>
-                            </ul>
-                            <p>En breve nos pondremos en contacto para coordinar la entrega.</p>
-                            <p>Saludos,<br><b>El equipo de BALIANT</b></p>
-                        `
-                    };
+                    const apiGoogle = "https://script.google.com/macros/s/AKfycbztDLJRE1RQju9SYZCOVvYuDgtkRa5DSAg6toHhiIUmwnyzQ_vzw078HA1Nj5epzw9Z/exec";
 
-                    const mailDueño = {
-                        from: `"Sistema BALIANT" <${process.env.EMAIL_BALIANT}>`,
-                        to: process.env.EMAIL_BALIANT,
-                        subject: `💰 ¡NUEVA VENTA! - Orden #${idVenta}`,
-                        html: `
-                            <h2>¡Felicidades, entró una nueva venta!</h2>
-                            <p><b>Cliente:</b> ${emailCliente}</p>
-                            <p><b>Total:</b> $${totalVenta}</p>
-                            <p>Entrá a tu base de datos para ver más detalles.</p>
-                        `
-                    };
+                    // 1. Disparamos el mail para el cliente
+                    await fetch(apiGoogle, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            to: emailCliente,
+                            subject: "¡Gracias por tu compra en BALIANT! 👕",
+                            html: `
+                                <h2>¡Hola! Tu pago se acreditó con éxito.</h2>
+                                <p>Gracias por confiar en BALIANT. Acá tenés el resumen de tu pedido:</p>
+                                <ul>
+                                    <li><b>Número de Orden:</b> #${idVenta}</li>
+                                    <li><b>Total pagado:</b> $${totalVenta}</li>
+                                </ul>
+                                <p>En breve nos pondremos en contacto para coordinar la entrega.</p>
+                                <p>Saludos,<br><b>El equipo de BALIANT</b></p>
+                            `
+                        })
+                    });
 
-                    await transporter.sendMail(mailCliente);
-                    await transporter.sendMail(mailDueño);
-                    console.log("✉️ [ÉXITO] ¡Los dos correos fueron enviados!");
+                    // 2. Disparamos tu mail de aviso (Dueño)
+                    await fetch(apiGoogle, {
+                        method: 'POST',
+                        body: JSON.stringify({
+                            to: process.env.EMAIL_BALIANT,
+                            subject: `💰 ¡NUEVA VENTA! - Orden #${idVenta}`,
+                            html: `
+                                <h2>¡Felicidades, entró una nueva venta!</h2>
+                                <p><b>Cliente:</b> ${emailCliente}</p>
+                                <p><b>Total:</b> $${totalVenta}</p>
+                                <p>Entrá a tu base de datos para ver más detalles.</p>
+                            `
+                        })
+                    });
+
+                    console.log("✉️ [ÉXITO] ¡Los dos correos saltaron el bloqueo de Render y fueron enviados!");
                 } catch (errorMail) {
-                    console.error("❌ [ERROR EN CORREOS]:", errorMail.message);
+                    console.error("❌ [ERROR EN CORREOS API]:", errorMail.message);
                 }
 
                 // ==========================================
